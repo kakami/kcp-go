@@ -131,6 +131,8 @@ func (seg *segment) encode(ptr []byte) []byte {
 
 // KCP defines a single KCP connection
 type KCP struct {
+	snmp *Snmp
+
 	conv, mtu, mss, state                  uint32
 	snd_una, snd_nxt, rcv_nxt              uint32
 	ssthresh                               uint32
@@ -184,6 +186,12 @@ func NewKCP(conv uint32, output output_callback) *KCP {
 	kcp.dead_link = IKCP_DEADLINK
 	kcp.output = output
 	return kcp
+}
+
+func (kcp *KCP) Swap(snmp *Snmp) *Snmp {
+	nn := kcp.snmp
+	kcp.snmp = snmp
+	return nn
 }
 
 // newSegment creates a KCP segment
@@ -600,6 +608,7 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 			}
 			if regular && repeat {
 				atomic.AddUint64(&DefaultSnmp.RepeatSegs, 1)
+				atomic.AddUint64(&kcp.snmp.RepeatSegs, 1)
 			}
 		} else if cmd == IKCP_CMD_WASK {
 			// ready to send back IKCP_CMD_WINS in Ikcp_flush
@@ -615,6 +624,7 @@ func (kcp *KCP) Input(data []byte, regular, ackNoDelay bool) int {
 		data = data[length:]
 	}
 	atomic.AddUint64(&DefaultSnmp.InSegs, inSegs)
+	atomic.AddUint64(&kcp.snmp.InSegs, inSegs)
 
 	// update rtt with the latest ts
 	// ignore the FEC packet
@@ -704,6 +714,7 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 		if _itimediff(ack.sn, kcp.rcv_nxt) >= 0 || len(kcp.acklist)-1 == i {
 			seg.sn, seg.ts = ack.sn, ack.ts
 			ptr = seg.encode(ptr)
+			atomic.AddUint64(&kcp.snmp.OutSegs, 1)
 		}
 	}
 	kcp.acklist = kcp.acklist[0:0]
@@ -742,6 +753,7 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 		seg.cmd = IKCP_CMD_WASK
 		makeSpace(IKCP_OVERHEAD)
 		ptr = seg.encode(ptr)
+		atomic.AddUint64(&kcp.snmp.OutSegs, 1)
 	}
 
 	// flush window probing commands
@@ -749,6 +761,7 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 		seg.cmd = IKCP_CMD_WINS
 		makeSpace(IKCP_OVERHEAD)
 		ptr = seg.encode(ptr)
+		atomic.AddUint64(&kcp.snmp.OutSegs, 1)
 	}
 
 	kcp.probe = 0
@@ -835,6 +848,7 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 			need := IKCP_OVERHEAD + len(segment.data)
 			makeSpace(need)
 			ptr = segment.encode(ptr)
+			atomic.AddUint64(&kcp.snmp.OutSegs, 1)
 			copy(ptr, segment.data)
 			ptr = ptr[len(segment.data):]
 
@@ -856,6 +870,7 @@ func (kcp *KCP) flush(ackOnly bool) uint32 {
 	sum := lostSegs
 	if lostSegs > 0 {
 		atomic.AddUint64(&DefaultSnmp.LostSegs, lostSegs)
+		atomic.AddUint64(&kcp.snmp.LostSegs, lostSegs)
 	}
 	if fastRetransSegs > 0 {
 		atomic.AddUint64(&DefaultSnmp.FastRetransSegs, fastRetransSegs)

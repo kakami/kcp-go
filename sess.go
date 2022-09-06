@@ -66,6 +66,8 @@ type (
 		l       *Listener      // pointing to the Listener object if it's been accepted by a Listener
 		block   BlockCrypt     // block encryption object
 
+		snmp *Snmp
+
 		// kcp receiving is based on packets
 		// recvbuf turns packets into stream
 		recvbuf []byte
@@ -138,6 +140,7 @@ func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn 
 	sess.l = l
 	sess.block = block
 	sess.recvbuf = make([]byte, mtuLimit)
+	sess.snmp = newSnmp()
 
 	// cast to writebatch conn
 	if _, ok := conn.(*net.UDPConn); ok {
@@ -172,6 +175,7 @@ func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn 
 			sess.output(buf[:size])
 		}
 	})
+	sess.kcp.Swap(sess.snmp)
 	sess.kcp.ReserveBytes(sess.headerSize)
 
 	if sess.l == nil { // it's a client connection
@@ -193,6 +197,16 @@ func newUDPSession(conv uint32, dataShards, parityShards int, l *Listener, conn 
 	return sess
 }
 
+func (s *UDPSession) Swap() *Snmp {
+	snmp := newSnmp()
+	nn := s.snmp
+	s.snmp = snmp
+	if s.kcp != nil {
+		s.kcp.Swap(snmp)
+	}
+	return nn
+}
+
 // Read implements net.Conn
 func (s *UDPSession) Read(b []byte) (n int, err error) {
 	for {
@@ -202,6 +216,7 @@ func (s *UDPSession) Read(b []byte) (n int, err error) {
 			s.bufptr = s.bufptr[n:]
 			s.mu.Unlock()
 			atomic.AddUint64(&DefaultSnmp.BytesReceived, uint64(n))
+			atomic.AddUint64(&s.snmp.BytesReceived, uint64(n))
 			return n, nil
 		}
 
@@ -210,6 +225,7 @@ func (s *UDPSession) Read(b []byte) (n int, err error) {
 				s.kcp.Recv(b)
 				s.mu.Unlock()
 				atomic.AddUint64(&DefaultSnmp.BytesReceived, uint64(size))
+				atomic.AddUint64(&s.snmp.BytesReceived, uint64(size))
 				return size, nil
 			}
 
@@ -225,6 +241,7 @@ func (s *UDPSession) Read(b []byte) (n int, err error) {
 			s.bufptr = s.recvbuf[n:] // pointer update
 			s.mu.Unlock()
 			atomic.AddUint64(&DefaultSnmp.BytesReceived, uint64(n))
+			atomic.AddUint64(&s.snmp.BytesReceived, uint64(n))
 			return n, nil
 		}
 
@@ -298,6 +315,7 @@ func (s *UDPSession) WriteBuffers(v [][]byte) (n int, err error) {
 			}
 			s.mu.Unlock()
 			atomic.AddUint64(&DefaultSnmp.BytesSent, uint64(n))
+			atomic.AddUint64(&s.snmp.BytesSent, uint64(n))
 			return n, nil
 		}
 
@@ -614,7 +632,7 @@ func (s *UDPSession) GetSRTT() int32 {
 	return s.kcp.rx_srtt
 }
 
-// GetRTTVar gets current rtt variance of the session
+// GetSRTTVar gets current rtt variance of the session
 func (s *UDPSession) GetSRTTVar() int32 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -746,7 +764,9 @@ func (s *UDPSession) kcpInput(data []byte) {
 	}
 
 	atomic.AddUint64(&DefaultSnmp.InPkts, 1)
+	atomic.AddUint64(&s.snmp.InPkts, 1)
 	atomic.AddUint64(&DefaultSnmp.InBytes, uint64(len(data)))
+	atomic.AddUint64(&s.snmp.InBytes, uint64(len(data)))
 	if fecParityShards > 0 {
 		atomic.AddUint64(&DefaultSnmp.FECParityShards, fecParityShards)
 	}
@@ -1043,7 +1063,11 @@ func DialWithOptions(raddr string, block BlockCrypt, dataShards, parityShards in
 		network = "udp"
 	}
 
-	conn, err := net.ListenUDP(network, nil)
+	//conn, err := net.ListenUDP(network, nil)
+	//if err != nil {
+	//	return nil, errors.WithStack(err)
+	//}
+	conn, err := net.DialUDP(network, nil, udpaddr)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
